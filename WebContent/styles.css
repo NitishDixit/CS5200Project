@@ -1,0 +1,125 @@
+.formbg {
+	background-color: #99CCCC;
+}
+.topcell
+{
+	background-color:#000041;
+	font-family: verdana;
+	font-size: 10px;
+	font-weight: bold;
+	color: #FFFFFF;
+}
+.toptable
+{
+	background-color:#4B687F;
+}
+.heading {
+	font-family: "Times New Roman", Times, serif;
+	font-size: 26 px;
+	font-weight: bolder;
+	color: #FFFFFF;
+	text-align: center;
+	vertical-align: middle;
+	letter-spacing : 5pt;
+	background-color:#4B687F;
+}
+.bottom {
+	font-family: verdana;
+	font-size: 10px;
+	font-weight: bold;
+	color: #FFFFFF;
+	background-color: #000041;
+	text-align: center;
+}
+.text2 {
+	font-family: Verdana;
+	font-size: 14px;
+	font-style: normal;
+	font-weight: normal;
+	color: #000041;
+	text-align: right;
+
+}
+.subhead {
+	font-family: Verdana;
+	font-size: 17px;
+	font-style: normal;
+	font-weight: bolder;
+	background-color: #000041;
+	text-align: center;
+	vertical-align: middle;
+	color: #FFFFFF;
+	text-transform: capitalize;
+}
+
+a {
+	font-family:Verdana;
+	font-size:18px;
+	text-align: center;
+	text-indent:14pt;
+}
+.link{
+	
+	text-align:center;
+}
+.linkcurrent{
+	background-color: #4B687F;
+	text-align:center;
+}
+a:link {color: #0000FF;}
+a:visited {color: #FF0000;}
+a:hover {
+	text-decoration: none;
+	color: #0000FF;
+	font-weight:bolder;
+}
+a:active {
+	color: #0000F1;
+	text-decoration: underline;
+	font-family: Verdana;
+	font-size: 12px;
+	font-weight: bold;
+}
+input,select,submit,reset,textarea,.text3
+{
+	color: #000041;
+	font-family: Verdana;
+	font-size: 17px;
+}
+.mandatory {
+	font-family: Verdana, ;
+	font-size: 14px;
+	font-style: normal;
+	font-weight: bolder;
+	color: #FF0000;
+	text-align: right;
+}
+.desc
+{
+	font-size:14pt;
+	color:#000041;
+}
+.successoutput
+{
+	color:#003300;
+	font-size:18pt;
+	text-align:Center;
+}
+.wrongoutput
+{
+	color:#FF0000;
+	font-size:18pt;
+	text-align:Center;
+}
+.mystyle1
+{
+	color:rgb(0,100,0);
+	font-size:15pt;
+	font-weight: bold;
+	text-align:center;
+}
+
+.mystyle2
+{
+	background-color: lightgrey;
+}
