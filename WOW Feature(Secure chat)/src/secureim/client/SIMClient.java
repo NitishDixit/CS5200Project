@@ -1,0 +1,481 @@
+/*
+This class implements the login, list, send and logout functionality by interacting
+with the server and the client thread.
+*/
+
+package secureim.client;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.security.MessageDigest;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.Vector;
+
+import javax.crypto.SecretKey;
+import javax.crypto.spec.DHParameterSpec;
+
+import secureim.utils.CryptoHelper;
+import secureim.utils.DHHelper;
+import secureim.utils.HashHelper;
+
+public class SIMClient {
+	
+	// variables to send signal to the server specifying different requests.
+	static final int LOGIN = 1;
+	static final int LIST = 2;
+	static final int LOGOUT = 3;
+	static final int MESSAGE = 4;
+	static final int ERROR = 5;
+	static final int CHALLENGE = 6;
+	static final int KEY_REQ = 7;
+
+	InetAddress serverIP;
+	int port;
+	byte[] serverPubKey;
+	int clientPort;
+	SecretKey symK; // Symmetric key between the client and the server.
+	Socket sock;
+	ServerSocket listenerSock;
+	boolean logout = false;
+	Thread t = null;
+	
+	// constructor initializing the properties of the server.
+	public SIMClient(InetAddress serIP, int p,byte[] serPubKey){
+		serverIP = serIP;
+		port = p;
+		serverPubKey = serPubKey;
+	}
+	
+	// Starting the client thread and making a new socket connection.
+	public int start() throws IOException{
+		ClientThread listenerThread = new ClientThread(this);
+		listenerSock = listenerThread.initSocket();
+		int newPort =  listenerSock.getLocalPort();
+		clientPort = newPort;
+		t = new Thread(listenerThread);
+		t.start();
+		sock = new Socket(serverIP, port);
+		return newPort;
+	}
+	
+	/*
+	 Function to implement the login authentication of client with the server.
+	The function takes in String username and String password as input and outputs 
+	true if the credentials are valid else false.
+	*/
+	public boolean login(String user, String pwd){
+		try
+		{
+			CryptoHelper ch = new CryptoHelper();
+			MessageDigest msgDigest = MessageDigest.getInstance("SHA-256"); 
+			byte[] userHash = msgDigest.digest(user.getBytes("UTF-16")); // generating hash of the user
+			
+			if(sock.isConnected())
+			{
+				// send msg {Login+Hash(User)}serverPublickey to the server
+				OutputStream sout = sock.getOutputStream();				
+				ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+				outputStream.write((byte)LOGIN); // send login signal to the server
+				HashHelper.WriteInt(outputStream, userHash.length);
+				outputStream.write(userHash);
+				HashHelper.WriteInt(outputStream, clientPort);
+				byte msg[] = outputStream.toByteArray();
+				msg = ch.asymEncrypt(serverPubKey, msg); // Asymmetric encrypting the message
+				outputStream = new ByteArrayOutputStream();
+				HashHelper.WriteInt(outputStream, msg.length);
+				outputStream.write(msg);
+				sout.write(outputStream.toByteArray()); // sending the message to the server
+				
+				// read server response
+				DataInputStream sin = new DataInputStream(sock.getInputStream());
+				int response = HashHelper.ReadInt(sin);
+				
+				// Any error is handled in the following condition
+				if (response == ERROR){
+					System.out.println("User already logged in or doesn't exist...");
+					return false;
+				}
+				
+				// if nonce and salt are received then read nonce
+				byte[] nonce = new byte[response];
+				sin.readFully(nonce);
+				
+				// Read the salt for the password
+				byte[] salt = new byte[HashHelper.ReadInt(sin)];
+				sin.readFully(salt);
+				
+				// Send nonce+hash(salt||password) to server encrypted with server's public key
+				byte[] passwordByte = pwd.getBytes("UTF-16");
+				byte[] saltedPassword = new byte[salt.length + passwordByte.length];
+				System.arraycopy(salt, 0, saltedPassword, 0, salt.length);
+				System.arraycopy(passwordByte, 0, saltedPassword, salt.length, passwordByte.length);
+				byte[] saltedHash = msgDigest.digest(saltedPassword);
+				outputStream = new ByteArrayOutputStream();
+				HashHelper.WriteInt(outputStream, nonce.length);
+				outputStream.write(nonce);
+				HashHelper.WriteInt(outputStream, saltedHash.length);
+				outputStream.write(saltedHash);
+				// Asymmetric encrypting the salted hash with the server's public key.
+				byte[] message = ch.asymEncrypt(serverPubKey, outputStream.toByteArray());
+				outputStream = new ByteArrayOutputStream();
+				HashHelper.WriteInt(outputStream, message.length);
+				outputStream.write(message);
+				sout.write(outputStream.toByteArray()); // sending the message to the server.
+				
+				// Generate Client's Diffie-Hellman Part
+				DHHelper dh = new DHHelper();
+				ByteArrayOutputStream out = new ByteArrayOutputStream();
+				ObjectOutputStream serializer = new ObjectOutputStream(sout);
+				DHParameterSpec spec = dh.getParameterSpec();
+				serializer.writeObject(spec.getP());
+				serializer.writeObject(spec.getG());
+				serializer.writeInt(spec.getL());
+				serializer.writeObject(dh.getPublicKey());
+				serializer.flush();
+				
+				//read the server's response
+				response = HashHelper.ReadInt(sin);
+				
+				// Errors are handled by the following condition.
+				if (response == ERROR){
+					System.out.println("Incorrect password...");
+					return false;
+				}
+				
+				//else read Diffie-Hellman part of server
+				byte[] serverDH = new byte[response];
+				sin.readFully(serverDH);
+				ByteArrayInputStream in = new ByteArrayInputStream(serverDH);
+				ObjectInputStream deserializer = new ObjectInputStream(in);
+				PublicKey pubkey = (PublicKey)deserializer.readObject();
+				
+				// Obtain the symmetric key.
+				SecretKey symKey = dh.doFinal(pubkey, "AES");
+				symK = symKey;
+				
+				// reading c1 received from server
+				byte[] c1iv = new byte[HashHelper.ReadInt(sin)];
+				sin.readFully(c1iv);
+				ByteArrayInputStream bais = new ByteArrayInputStream(c1iv);
+				DataInputStream dis = new DataInputStream(bais);
+				int len = HashHelper.ReadInt(dis);
+				byte[] iv = new byte[len];
+				dis.readFully(iv);
+				byte[] c1 = new byte[HashHelper.ReadInt(dis)]; 
+				dis.readFully(c1);
+				byte[] c1_dec = ch.symDecrypt(symKey, iv, c1);
+				
+				// Generate C2 to be appended with C1
+				SecureRandom rand = new SecureRandom();
+				byte[] c2 = new byte[32];
+				rand.nextBytes(c2);
+				
+				// encrypt c1+c2 with symmetric key 
+				out = new ByteArrayOutputStream();
+				out.write(c1_dec);
+				out.write(c2);
+				byte[] c1c2enc = ch.symEncrypt(symKey, out.toByteArray());
+				
+				// send K{c1+c2} to server
+				out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, c1c2enc.length);
+				out.write(c1c2enc);
+				sout.write(out.toByteArray());
+				
+				// receive c2 from server and decrypt
+				byte[] c2iv = new byte[HashHelper.ReadInt(sin)];
+				sin.readFully(c2iv);
+				bais = new ByteArrayInputStream(c2iv);
+				dis = new DataInputStream(bais);
+				len = HashHelper.ReadInt(dis);
+				iv = new byte[len];
+				dis.readFully(iv);
+				byte[] c2_received = new byte[HashHelper.ReadInt(dis)]; 
+				dis.readFully(c2_received);
+				byte[] c2_dec = ch.symDecrypt(symKey, iv, c2_received);
+				
+				// compare received and sent c2
+				if (!Arrays.equals(c2_dec, c2)){
+					System.out.println("Login failed as c2!=c2");
+					return false;
+				}
+				
+				System.out.println("Logged in successfully...");
+				return true;
+				
+			}
+			else{
+				System.out.println("Socket not connected");
+			}
+			return false;
+		}
+		catch(Exception e)
+		{
+			System.out.println("Login failed");
+			e.printStackTrace();
+			return false;
+		}
+	}
+	
+	/*
+	Function to list all the online users on the server.
+	It does not take any argument and returns a vector which contains the
+	list of all the online users.
+	*/
+	public Vector<String> list(){
+		try
+		{
+			if( sock.isConnected() )
+			{
+				// send K{LIST} to server
+				OutputStream sout = sock.getOutputStream();				
+				ByteArrayOutputStream out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, LIST);
+				CryptoHelper ch = new CryptoHelper();
+				byte[] msg = ch.symEncrypt(symK, out.toByteArray());
+				out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, msg.length);
+				out.write(msg);
+				sout.write(out.toByteArray());
+				
+				// receive K{list of users} from server
+				DataInputStream dis = new DataInputStream(sock.getInputStream());
+				
+				// read the message encrypted with the symmetric key
+				byte[] msgiv = new byte[HashHelper.ReadInt(dis)];
+				dis.readFully(msgiv);
+				
+				// Decrypt the message
+				ByteArrayInputStream bais = new ByteArrayInputStream(msgiv);
+				DataInputStream dis2 = new DataInputStream(bais);
+				byte[] iv = new byte[HashHelper.ReadInt(dis2)];
+				dis2.readFully(iv);
+				byte[] msg_en = new byte[HashHelper.ReadInt(dis2)]; 
+				dis2.readFully(msg_en);
+				byte[] msg1 = ch.symDecrypt(symK, iv, msg_en);
+				
+				bais = new ByteArrayInputStream(msg1);
+				ObjectInputStream deserializer = new ObjectInputStream(bais);
+				Vector<String> userList = (Vector<String>) deserializer.readObject();
+				return userList;
+			}
+			return null;
+		}
+		catch(Exception e)
+		{
+			System.out.println("Request failed");
+			return null;
+		}
+	}
+
+	
+	/*
+	Function to the send the message from one online user to another.
+	It takes in the three strings corresponding to the sender, message and
+	the receiver as input and does not return anything.
+	*/
+	public void send(String user, String msgToSend, String userFrom){
+		try{
+			if(sock.isConnected()){
+				OutputStream sout = sock.getOutputStream();
+				ByteArrayOutputStream out = new ByteArrayOutputStream();
+				CryptoHelper ch = new CryptoHelper();
+				
+				// send KAS{Key_Req+Username}
+				HashHelper.WriteInt(out, KEY_REQ);
+				out.write(user.getBytes());
+				byte[] msg = ch.symEncrypt(symK, out.toByteArray());
+				out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, msg.length);
+				out.write(msg);
+				sout.write(out.toByteArray());
+				
+				// receive KAS{B,ttB,KAB}
+				DataInputStream dis = new DataInputStream(sock.getInputStream());
+				
+				// read the message encrypted with the symmetric key
+				byte[] msgiv = new byte[HashHelper.ReadInt(dis)];
+				dis.readFully(msgiv);
+				
+				// Decrypt the message
+				ByteArrayInputStream bais = new ByteArrayInputStream(msgiv);
+				DataInputStream dis2 = new DataInputStream(bais);
+				byte[] iv = new byte[HashHelper.ReadInt(dis2)];
+				dis2.readFully(iv);
+				byte[] msg_en = new byte[HashHelper.ReadInt(dis2)]; 
+				dis2.readFully(msg_en);
+				byte[] msg1 = ch.symDecrypt(symK, iv, msg_en);
+
+				// Separate B,ttB and KAB
+				ByteArrayInputStream bin = new ByteArrayInputStream(msg1);
+				ObjectInputStream deserializer = new ObjectInputStream(bin);
+				String userTo = (String) deserializer.readObject();
+				InetAddress sockB = (InetAddress) deserializer.readObject();
+				int portB = deserializer.readInt();
+				int len = deserializer.readInt();
+				byte[] ttB = new byte[len];
+				deserializer.readFully(ttB);
+				SecretKey KAB = (SecretKey) deserializer.readObject();
+				
+				// Connecting to the intended online user
+				Socket socB = new Socket(sockB, portB);
+				dis = new DataInputStream(socB.getInputStream());
+				sout = socB.getOutputStream();
+				
+				// create Diffie-Hellman part g^a modp
+				DHHelper dh = new DHHelper();
+				out = new ByteArrayOutputStream();
+				ObjectOutputStream serializer = new ObjectOutputStream(out);
+				DHParameterSpec spec = dh.getParameterSpec();
+				serializer.writeObject(spec.getP());
+				serializer.writeObject(spec.getG());
+				serializer.writeInt(spec.getL());
+				serializer.writeObject(dh.getPublicKey());
+				serializer.flush();
+				byte[] gamodp = out.toByteArray();
+				
+				// Creating KAB{chat_msg,A,N1} to be sent over to the other user
+				SecureRandom rand = new SecureRandom();
+				byte[] N1 = new byte[32];
+				rand.nextBytes(N1);
+				out = new ByteArrayOutputStream();
+				out.write(MESSAGE);
+				byte[] userFromB = userFrom.getBytes();
+				HashHelper.WriteInt(out, userFromB.length);
+				out.write(userFromB);
+				out.write(N1);
+				byte[] encMsg = ch.symEncrypt(KAB, out.toByteArray());
+				
+				// Send ttB, g^a modp and KAB{chat_msg,A,N1} to the intended receiver
+				out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, ttB.length);
+				out.write(ttB);
+				HashHelper.WriteInt(out, gamodp.length);
+				out.write(gamodp);
+				HashHelper.WriteInt(out, encMsg.length);
+				out.write(encMsg);
+				sout.write(out.toByteArray());
+				
+				// Receiving g^b modp and KAB{N1,N2}
+				// Read Diffie-Hellman part of client B
+				deserializer = new ObjectInputStream(dis);
+				PublicKey pkB = (PublicKey) deserializer.readObject();
+				
+				// Create key KABN
+				SecretKey KABN = dh.doFinal(pkB, "AES");
+				
+				// Receive KAB{N1,N2}
+				len = HashHelper.ReadInt(dis);
+				msgiv = new byte[len];
+				dis.readFully(msgiv);
+				
+				// Decrypt the message
+				bais = new ByteArrayInputStream(msgiv);
+				dis2 = new DataInputStream(bais);
+				iv = new byte[HashHelper.ReadInt(dis2)];
+				dis2.readFully(iv);
+				msg_en = new byte[HashHelper.ReadInt(dis2)]; 
+				dis2.readFully(msg_en);
+				msg1 = ch.symDecrypt(KAB, iv, msg_en);
+				
+				byte[] N1_received = Arrays.copyOfRange(msg1, 0, 32);
+				byte[] N2 = Arrays.copyOfRange(msg1, 32, msg1.length);
+				
+				// Validate N1
+				if(!Arrays.equals(N1, N1_received)){
+					System.out.println("N1 nonce is not equal...");
+					return;
+				}
+				
+				// Send KAB{N2} to B
+				byte[] N2enc = ch.symEncrypt(KAB, N2); // Encrypting N2 with the symmetric key KAB
+				out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, N2enc.length);
+				out.write(N2enc);
+				sout.write(out.toByteArray());
+				
+				// For sending the message to B - KABN{message,HMAC}
+				out = new ByteArrayOutputStream();
+				serializer = new ObjectOutputStream(out);
+
+				// Encrypting the message to be sent to B
+				serializer.writeObject(msgToSend);
+				serializer.flush();
+
+				// Create HMAC
+				MessageDigest msgDigest = MessageDigest.getInstance("SHA-256");
+				byte[] mac = msgDigest.digest(msgToSend.getBytes());
+				HashHelper.WriteInt(out, mac.length);
+				out.write(mac);
+				msg_en = ch.symEncrypt(KABN, out.toByteArray());
+				
+				// Send KABN{message,HMAC}
+				out = new ByteArrayOutputStream(); 
+				HashHelper.WriteInt(out, msg_en.length);
+				out.write(msg_en);
+				sout.write(out.toByteArray());
+			
+				System.out.println("Message sent...");
+			}
+			else{
+				System.out.println("Connection lost...");
+			}
+		}catch(Exception e){
+			e.printStackTrace();
+		}
+	}
+	
+	/*
+	Function to implement the login functionality of the client
+	*/
+	public void logout(){
+		try{
+			if(sock.isConnected()){
+				OutputStream sout = sock.getOutputStream();
+				CryptoHelper ch = new CryptoHelper();
+				
+				// Send K{LOGOUT} to server
+				ByteArrayOutputStream out = new ByteArrayOutputStream();
+				HashHelper.WriteInt(out, LOGOUT);
+				byte[] msg = ch.symEncrypt(symK, out.toByteArray());
+				HashHelper.WriteInt(sout, msg.length);
+				sout.write(msg);
+				logout = true;
+				sock.close();
+				listenerSock.close();
+				System.out.println("Client logged out");
+			}
+		}
+		catch(Exception e){
+		}
+	
+
+	}
+
+	/*
+	Function to close the sockets if the user is not verified
+	*/
+	public void exitClient()
+	{
+		try{
+			if(sock.isConnected()){
+			sock.close();
+			//listenerSock.close();
+			System.out.println("restart your client.....");
+			System.exit(-1);
+			}
+		}
+		catch(Exception e){
+		}
+	}
+}

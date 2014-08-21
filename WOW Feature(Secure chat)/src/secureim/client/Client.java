@@ -1,0 +1,168 @@
+/* 
+The class takes the username and password from the user then logs the authorized
+client into the server and then handles different commands accordingly
+*/
+
+package secureim.client;
+
+import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.net.InetAddress;
+import java.util.Properties;
+import java.util.Scanner;
+import java.util.StringTokenizer;
+import java.util.Vector;
+
+public class Client {
+
+	public static void main(String[] args) {
+
+		// Read all the properties of the client
+		Properties prop = new Properties();
+		try{
+			FileInputStream fin = new FileInputStream("Client.properties");
+			prop.load(fin);
+		}catch(Exception e){
+			System.out.println("Error reading settings file.");
+			System.exit(-1);
+		}
+		
+		if(!(prop.containsKey("ServerAddress") 
+				&& prop.containsKey("ServerPort") 
+				&& prop.containsKey("ServerPubKeyFile")))
+		{
+			System.out.println("Properties file does not contain server settings.");
+			System.exit(-1);
+		}
+
+		// getting the information of the server to be connected to
+		InetAddress serverIP = null;
+		int serverPort = Integer.parseInt(prop.getProperty("ServerPort")); 
+		try {
+			serverIP = InetAddress.getByName((String) prop.get("ServerAddress"));
+		} catch (Exception e) {
+			System.exit(-1);
+		}
+
+		//Reading the public key of the server
+		byte[] serverPubKey = new byte[1];
+		try{
+			File keyFile = new File(prop.getProperty("ServerPubKeyFile"));
+			FileInputStream serverPubKeyFile = new FileInputStream(keyFile);
+			DataInputStream dis = new DataInputStream(serverPubKeyFile);
+			serverPubKey = new byte[dis.available()];
+			dis.readFully(serverPubKey);
+			dis.close();
+		}
+		catch(Exception e){
+			System.out.println("Failed to read Keys");
+			e.printStackTrace();
+			System.exit(-1);
+		}
+		
+		// Read username and password
+		char[] pwd = null;
+		Scanner scan = new Scanner(System.in);
+		System.out.print(">Username: ");
+		String username = scan.nextLine(); // getting the username
+		System.out.print(">Password: ");
+		pwd = System.console().readPassword(); // getting the password without echoing
+		String password = new String(pwd);
+
+		// Start Client Thread
+		SIMClient client = new SIMClient(serverIP,serverPort,serverPubKey);
+		try
+		{
+			client.start();
+		}
+		catch(Exception e)
+		{
+			System.out.println("Error starting listener thread.");
+			return;
+		}
+		
+		// Following condition is invoked only when the user is authenticated
+		if(client.login(username,password))
+		{
+			System.out.print(">");
+			String userInput = scan.nextLine();
+			Vector<String> users = client.list(); // Vector to store the users present
+			while(!userInput.toLowerCase().equals("logout"))
+			{
+				try
+				{
+					if(userInput.equals(""))
+					{
+						System.out.println("Enter some command");
+						
+					}
+					else{
+					StringTokenizer t = new StringTokenizer(userInput);
+					String command = t.nextToken();
+					
+					if(command.toLowerCase().equals("list")) // executes if the command is "list"
+					{
+						users = client.list(); // gets the list of users online
+						if( users != null )
+						{
+							System.out.println("Online users:");
+							for( int i = 0; i < users.size(); i++ )
+								System.out.println(users.get(i));
+						}
+					}
+					else if (command.toLowerCase().equals("send")) // executes if the command is "send"
+					{
+						if (!t.hasMoreElements()){  // checking if the receiver is specified
+							System.out.println("Must enter the receiver for the message...");
+						}
+						else
+						{
+							String userB = t.nextToken();
+							String message = "";
+							if(t.hasMoreTokens()){
+								while(t.hasMoreTokens()){
+									message = message + " " + t.nextToken() ;
+								}
+								users = client.list();
+								if (users == null)
+									break;
+								boolean found = false;
+								// checking if the user specified is online
+								for (String u: users){
+									if (u.equals(userB)){
+										found = true;
+									}
+								}
+								if (found){
+									client.send(userB, message,username);
+								}
+								else{
+									System.out.println("Entered user is not online...");
+								}
+							}
+							else{
+								System.out.println("Enter the message to be sent...");
+							}
+						}
+					}
+					
+					else{
+						System.out.println("Invalid command entered...");
+					}
+				}
+				}
+				catch(Exception e)
+				{
+					
+				}
+
+				System.out.print(">");
+				userInput = scan.nextLine();
+			}
+			client.logout(); // logout the client on request
+		}
+		else
+		client.exitClient(); // close the sockets if the credentials are incorrect
+	}
+}
